@@ -9,7 +9,7 @@
 
 using namespace Rcpp;
 
-// Compute Shannon entropy from frequencies
+// --- Compute Shannon entropy ---
 inline double compute_shannon(const std::vector<double>& frequencies) {
     double entropy = 0.0;
     for (double p : frequencies) {
@@ -20,34 +20,33 @@ inline double compute_shannon(const std::vector<double>& frequencies) {
     return entropy;
 }
 
-// Compute Pielou's evenness index
+// --- Compute Pielou's evenness ---
 inline double compute_pielou(double shannon, std::size_t species_count) {
     return (species_count > 1 && shannon > 0.0) ? shannon / std::log2(species_count) : 0.0;
 }
 
-// ---- Parallel worker ----
+// --- Parallel computation worker ---
 struct DiversityComputationWorker : public RcppParallel::Worker {
-    const arma::umat& index_matrix;
-    const arma::vec& values_vector;
-    const arma::sp_mat& x_sp_mat;
-    arma::mat& result;
-    bool is_diversity_task;
+    const arma::umat& index_matrix;   // Index matrix
+    const arma::vec& values_vector;   // Values vector
+    const arma::sp_mat& x_sp_mat;     // Sparse matrix
+    arma::mat& result;                // Output result matrix
+    bool is_diversity_task;           // Task type flag
 
     DiversityComputationWorker(const arma::umat& im,
-                     const arma::vec& vv,
-                     const arma::sp_mat& gsm,
-                     arma::mat& r,
-                     bool is_div)
+                               const arma::vec& vv,
+                               const arma::sp_mat& gsm,
+                               arma::mat& r,
+                               bool is_div)
         : index_matrix(im), values_vector(vv), x_sp_mat(gsm),
           result(r), is_diversity_task(is_div) {}
-
-    // Operator to process rows in parallel
+ // Operator to process rows in parallel
     void operator()(std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
             double shannon = 0.0, pielou = 0.0;
 
             if (is_diversity_task) {
-                // Calculate diversity based on values_vector and index_matrix
+                // Vector mode
                 std::map<double, int> counts;
                 int total_valid = 0;
 
@@ -102,22 +101,27 @@ struct DiversityComputationWorker : public RcppParallel::Worker {
 };
 
 // [[Rcpp::export]]
-arma::mat calculate_auto_metrics(const arma::umat& index_matrix,
-                                 const arma::vec& values_vector,
-                                 const arma::sp_mat& x_sp_mat) {
-    if (index_matrix.n_rows == 0)
-        return arma::mat();
+arma::mat calculate_metrics_from_vector(const arma::umat& index_matrix,
+                                        const arma::vec& values_vector) {
+    if (index_matrix.n_rows == 0 || values_vector.n_elem == 0)
+        Rcpp::stop("index_matrix or values_vector is empty.");
 
-    bool use_vector = values_vector.n_elem > 0;
-    bool use_spmat  = x_sp_mat.n_cols > 0 && x_sp_mat.n_rows > 0;
+    arma::sp_mat dummy; 
+    arma::mat result(index_matrix.n_rows, 2, arma::fill::zeros);
+    DiversityComputationWorker worker(index_matrix, values_vector, dummy, result, true);
+    RcppParallel::parallelFor(0, index_matrix.n_rows, worker);
+    return result;
+}
 
-    if (!use_vector && !use_spmat)
-        Rcpp::stop("Either values_vector or x_sp_mat must be non-empty.");
-    if (use_vector && use_spmat)
-        Rcpp::stop("Only one of values_vector or x_sp_mat should be provided.");
+// [[Rcpp::export]]
+arma::mat calculate_metrics_from_spmat(const arma::umat& index_matrix,
+                                       const arma::sp_mat& x_sp_mat) {
+    if (index_matrix.n_rows == 0 || x_sp_mat.n_cols == 0 || x_sp_mat.n_rows == 0)
+        Rcpp::stop("index_matrix or x_sp_mat is empty or invalid.");
 
-    arma::mat result(index_matrix.n_rows, 2, arma::fill::zeros);  // columns: [Shannon, Pielou]
-    DiversityComputationWorker worker(index_matrix, values_vector, x_sp_mat, result, use_vector);
+    arma::vec dummy;  
+    arma::mat result(index_matrix.n_rows, 2, arma::fill::zeros);
+    DiversityComputationWorker worker(index_matrix, dummy, x_sp_mat, result, false);
     RcppParallel::parallelFor(0, index_matrix.n_rows, worker);
     return result;
 }
